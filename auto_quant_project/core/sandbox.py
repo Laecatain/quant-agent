@@ -92,10 +92,25 @@ def run_factor_code(code: str, data: pd.DataFrame) -> SandboxResult:
         if not isinstance(factor, pd.Series):
             raise TypeError(f"变量 `factor` 必须是 pandas.Series，当前类型为：{type(factor).__name__}")
 
+        # 统一转换为数值型。无法转成数值的异常输出会变成 NaN，由 evaluator 统一清理。
+        factor = pd.to_numeric(factor, errors="coerce")
+
+        # reindex 要求 factor.index 是唯一索引。若 LLM 代码通过 groupby/rolling/reset_index 等操作
+        # 生成了重复索引，直接 reindex 会触发晦涩报错，甚至造成因子与行情错配风险。
+        # 因此这里先显式检查，并给出可被下一轮 LLM 反思利用的清晰错误。
+        if factor.index.has_duplicates:
+            duplicated_examples = factor.index[factor.index.duplicated()].unique().tolist()[:5]
+            raise ValueError(
+                "因子 factor 的索引存在重复值，无法安全 reindex 到 data.index。"
+                "请确保 factor 是与原始 data 行一一对应的 pandas.Series；"
+                "若使用宽表/pivot/rolling，请在最后 stack 后按 ['date', 'code'] 映射回原始 data.index。"
+                f"重复索引示例：{duplicated_examples}"
+            )
+
         # 统一命名，便于落盘或拼接评估结果。
         # 若 LLM 代码经过 sort/groupby 后改变了索引顺序，reindex 会强制恢复到原始 data 行索引，
         # 避免 evaluator 将 f_{t,i} 错配到其他股票或日期。
-        factor = pd.to_numeric(factor, errors="coerce").reindex(data.index).rename("factor")
+        factor = factor.reindex(data.index).rename("factor")
         return SandboxResult(success=True, factor=factor, error=None)
 
     except Exception:  # noqa: BLE001 - 沙盒需要捕获所有异常并反馈给 LLM。
