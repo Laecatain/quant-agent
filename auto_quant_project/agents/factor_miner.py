@@ -21,9 +21,13 @@ from typing import Any
 
 import pandas as pd
 
+from core.backtester import StrategySpec, backtest_factor_strategy
 from core.evaluator import evaluate_factor
 from core.llm_client import GeminiClient
 from core.sandbox import SandboxResult, run_factor_code
+from core.scoring import score_metrics
+from core.splitter import DateSplit, split_by_date
+from core.static_checker import check_factor_code
 
 
 SYSTEM_PROMPT = """
@@ -65,7 +69,7 @@ class FactorTrial:
     generation: int
     candidate: FactorCandidate
     sandbox_success: bool
-    metrics: dict[str, float] | None
+    metrics: dict[str, Any] | None
     error: str | None
     score: float
 
@@ -92,6 +96,7 @@ class FactorMiner:
         self.factors_pool_dir = Path(factors_pool_dir)
         self.factors_pool_dir.mkdir(parents=True, exist_ok=True)
         self.top_k = top_k
+        self.data_splits = split_by_date(self.data)
         self.trials: list[FactorTrial] = []
 
     @staticmethod
@@ -135,8 +140,8 @@ class FactorMiner:
             if trial.sandbox_success:
                 print(
                     f"完成：{candidate.name} | score={trial.score:.4f} | "
-                    f"Rank_IC={trial.metrics.get('Rank_IC') if trial.metrics else None} | "
-                    f"Sharpe={trial.metrics.get('Sharpe_Ratio') if trial.metrics else None}"
+                    f"valid_Rank_IC={self._metric_for_log(trial.metrics, 'valid', 'Rank_IC')} | "
+                    f"valid_Sharpe={self._metric_for_log(trial.metrics, 'valid', 'Sharpe_Ratio')}"
                 )
             else:
                 print(f"失败：{candidate.name} | {trial.error[:300] if trial.error else '未知错误'}")
@@ -151,7 +156,24 @@ class FactorMiner:
         return self._candidate_from_payload(payload)
 
     def evaluate_candidate(self, candidate: FactorCandidate, generation: int) -> FactorTrial:
-        """执行候选因子并计算指标。"""
+        """执行候选因子并计算 train/valid/test 指标。"""
+        check_result = check_factor_code(candidate.code)
+        if not check_result.passed:
+            checker_error = self._format_checker_feedback(check_result.errors, check_result.warnings)
+            return self._make_trial(
+                generation=generation,
+                candidate=candidate,
+                sandbox_result=SandboxResult(success=False, factor=None, error=checker_error),
+                metrics={
+                    "static_checker": {
+                        "passed": False,
+                        "errors": check_result.errors,
+                        "warnings": check_result.warnings,
+                    }
+                },
+                score=float("-inf"),
+            )
+
         sandbox_result = run_factor_code(candidate.code, self.data)
 
         if not sandbox_result.success:
@@ -159,19 +181,36 @@ class FactorMiner:
                 generation=generation,
                 candidate=candidate,
                 sandbox_result=sandbox_result,
-                metrics=None,
+                metrics={
+                    "static_checker": {
+                        "passed": True,
+                        "errors": [],
+                        "warnings": check_result.warnings,
+                    }
+                },
                 score=float("-inf"),
             )
 
         assert sandbox_result.factor is not None
         try:
-            metrics = evaluate_factor(factor=sandbox_result.factor, price_data=self.data)
-            score = self._score_metrics(metrics)
+            metrics_by_split = self._evaluate_factor_by_split(sandbox_result.factor)
+            metrics_by_split["static_checker"] = {
+                "passed": True,
+                "errors": [],
+                "warnings": check_result.warnings,
+            }
+            score_breakdown = score_metrics(metrics_by_split)
+            metrics_by_split["score_breakdown"] = score_breakdown
+            try:
+                metrics_by_split["backtest"] = self._backtest_factor_by_split(sandbox_result.factor)
+            except Exception as exc:  # noqa: BLE001 - 回测失败应反馈但不阻断因子评分。
+                metrics_by_split["backtest_error"] = repr(exc)
+            score = float(score_breakdown["final_score"])
             return self._make_trial(
                 generation=generation,
                 candidate=candidate,
                 sandbox_result=sandbox_result,
-                metrics=metrics,
+                metrics=metrics_by_split,
                 score=score,
             )
         except Exception as exc:  # noqa: BLE001 - evaluator 异常也要反馈给 LLM。
@@ -179,7 +218,13 @@ class FactorMiner:
                 generation=generation,
                 candidate=candidate,
                 sandbox_result=SandboxResult(success=False, factor=None, error=repr(exc)),
-                metrics=None,
+                metrics={
+                    "static_checker": {
+                        "passed": True,
+                        "errors": [],
+                        "warnings": check_result.warnings,
+                    }
+                },
                 score=float("-inf"),
             )
 
@@ -276,7 +321,7 @@ class FactorMiner:
         generation: int,
         candidate: FactorCandidate,
         sandbox_result: SandboxResult,
-        metrics: dict[str, float] | None,
+        metrics: dict[str, Any] | None,
         score: float,
     ) -> FactorTrial:
         """统一生成试验记录。"""
@@ -304,6 +349,69 @@ class FactorMiner:
             "score": trial.score if math.isfinite(trial.score) else None,
             "error": trial.error[-1200:] if trial.error else None,
         }
+
+    def _evaluate_factor_by_split(self, factor: pd.Series) -> dict[str, Any]:
+        """在 train/valid/test 三段上分别评估因子。"""
+        metrics_by_split: dict[str, Any] = {}
+        for split_name, split_data in self.data_splits.as_dict().items():
+            split_factor = factor.reindex(split_data.index)
+            metrics_by_split[split_name] = evaluate_factor(factor=split_factor, price_data=split_data)
+        return metrics_by_split
+
+    def _backtest_factor_by_split(self, factor: pd.Series) -> dict[str, Any]:
+        """在 train/valid/test 三段上分别回测因子策略并返回可 JSON 序列化摘要。"""
+        backtest_by_split: dict[str, Any] = {}
+        strategy_spec = StrategySpec()
+        for split_name, split_data in self.data_splits.as_dict().items():
+            split_factor = factor.reindex(split_data.index)
+            result = backtest_factor_strategy(data=split_data, factor=split_factor, spec=strategy_spec)
+            backtest_by_split[split_name] = self._summarize_backtest_result(result)
+        return backtest_by_split
+
+    @staticmethod
+    def _summarize_backtest_result(result: dict[str, object]) -> dict[str, Any]:
+        """压缩回测结果，避免 trial JSON 写入完整持仓与净值序列。"""
+        daily_returns = result.get("daily_returns")
+        equity_curve = result.get("equity_curve")
+        metrics = result.get("metrics")
+        turnover = result.get("turnover")
+
+        daily_return_count = int(len(daily_returns)) if isinstance(daily_returns, pd.Series) else 0
+        final_equity = None
+        if isinstance(equity_curve, pd.Series) and not equity_curve.empty:
+            final_equity = float(equity_curve.iloc[-1])
+
+        average_turnover = None
+        if isinstance(turnover, pd.Series) and not turnover.empty:
+            average_turnover = float(turnover.mean())
+
+        return {
+            "metrics": dict(metrics) if isinstance(metrics, dict) else {},
+            "daily_return_count": daily_return_count,
+            "final_equity": final_equity,
+            "average_turnover": average_turnover,
+        }
+
+    @staticmethod
+    def _format_checker_feedback(errors: list[str], warnings: list[str]) -> str:
+        """将 static checker 结果压缩成可进入 trial.error 的文本。"""
+        payload = {
+            "stage": "static_checker",
+            "passed": False,
+            "errors": errors,
+            "warnings": warnings,
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def _metric_for_log(metrics: dict[str, Any] | None, split: str, key: str) -> Any:
+        """安全读取日志展示用指标。"""
+        if not metrics:
+            return None
+        split_metrics = metrics.get(split)
+        if not isinstance(split_metrics, dict):
+            return None
+        return split_metrics.get(key)
 
     def _persist_trial(self, trial: FactorTrial) -> None:
         """将每次试验保存为 JSON，便于中断后复盘。"""

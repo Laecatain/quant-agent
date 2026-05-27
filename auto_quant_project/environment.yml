@@ -1,0 +1,13 @@
+name: auto-quant-agent
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - numpy>=1.26.0
+  - pandas>=2.1.0
+  - pyarrow>=14.0.0
+  - requests>=2.31.0
+  - pip:
+      - akshare>=1.18.0
