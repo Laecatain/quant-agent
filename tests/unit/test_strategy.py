@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from agents.factor_miner import FactorCandidate
 from core.backtester import StrategySpec
 
 
@@ -56,3 +57,35 @@ class TestStrategySpecDefaults:
     def test_rejects_unsupported_strategy_sides(self, side: str) -> None:
         with pytest.raises(ValueError, match="side"):
             StrategySpec(side=side)
+
+
+class TestFactorCandidateStrategy:
+    def test_defaults_to_default_strategy(self) -> None:
+        candidate = FactorCandidate(
+            name="factor",
+            hypothesis="hypothesis",
+            code="factor = data['close']",
+            lookback_days=1,
+            expected_direction="positive",
+        )
+
+        assert candidate.strategy == StrategySpec()
+
+    def test_accepts_explicit_strategy(self) -> None:
+        strategy = StrategySpec(
+            top_quantile=0.25,
+            rebalance_days=3,
+            cost_bps=12.5,
+            side="long_only",
+        )
+
+        candidate = FactorCandidate(
+            name="factor",
+            hypothesis="hypothesis",
+            code="factor = data['close']",
+            lookback_days=1,
+            expected_direction="positive",
+            strategy=strategy,
+        )
+
+        assert candidate.strategy == strategy

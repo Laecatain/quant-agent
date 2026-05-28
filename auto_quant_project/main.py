@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -75,6 +76,75 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _format_number(value: Any, digits: int = 4) -> str:
+    if value is None:
+        return "NA"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "NA"
+    if not pd.notna(number):
+        return "NA"
+    return f"{number:.{digits}f}"
+
+
+def _split_metrics_summary(metrics: dict[str, Any], split: str) -> str:
+    split_metrics = metrics.get(split)
+    if not isinstance(split_metrics, dict):
+        return f"{split}: NA"
+    return (
+        f"{split}: Rank_IC={_format_number(split_metrics.get('Rank_IC'))}, "
+        f"ICIR={_format_number(split_metrics.get('ICIR'))}, "
+        f"Sharpe={_format_number(split_metrics.get('Sharpe_Ratio'))}, "
+        f"Sample_Size={_format_number(split_metrics.get('Sample_Size'), digits=0)}"
+    )
+
+
+def _backtest_summary(metrics: dict[str, Any], split: str) -> str:
+    backtest = metrics.get("backtest")
+    if not isinstance(backtest, dict):
+        return f"{split} backtest: NA"
+    split_backtest = backtest.get(split)
+    if not isinstance(split_backtest, dict):
+        return f"{split} backtest: NA"
+    backtest_metrics = split_backtest.get("metrics")
+    if not isinstance(backtest_metrics, dict):
+        backtest_metrics = {}
+    return (
+        f"{split} backtest: ann_return={_format_number(backtest_metrics.get('annualized_return'))}, "
+        f"sharpe={_format_number(backtest_metrics.get('sharpe'))}, "
+        f"max_drawdown={_format_number(backtest_metrics.get('max_drawdown'))}, "
+        f"turnover={_format_number(split_backtest.get('average_turnover'))}, "
+        f"final_equity={_format_number(split_backtest.get('final_equity'))}"
+    )
+
+
+def _print_best_strategy_summary(best_trial: Any) -> None:
+    metrics = best_trial.metrics if isinstance(best_trial.metrics, dict) else {}
+    score_breakdown = metrics.get("score_breakdown") if isinstance(metrics, dict) else {}
+    details = score_breakdown.get("details", {}) if isinstance(score_breakdown, dict) else {}
+    quality_reasons = details.get("quality_reasons", []) if isinstance(details, dict) else []
+    overfit_reasons = details.get("overfit_reasons", []) if isinstance(details, dict) else []
+
+    print(f"当前最佳策略：{best_trial.candidate.name}")
+    print(f"假设：{best_trial.candidate.hypothesis}")
+    print(f"策略参数：{best_trial.candidate.strategy}")
+    print(_split_metrics_summary(metrics, "valid"))
+    print(_split_metrics_summary(metrics, "test"))
+    print(_backtest_summary(metrics, "valid"))
+    print(_backtest_summary(metrics, "test"))
+    print(f"综合得分：{best_trial.score:.4f}")
+    if isinstance(score_breakdown, dict):
+        print(
+            "评分分解："
+            f"raw={_format_number(score_breakdown.get('raw_score'))}, "
+            f"overfit_penalty={_format_number(score_breakdown.get('overfit_penalty'))}, "
+            f"quality_penalty={_format_number(score_breakdown.get('quality_penalty'))}"
+        )
+    if quality_reasons or overfit_reasons:
+        print(f"惩罚原因：{'; '.join(str(reason) for reason in [*overfit_reasons, *quality_reasons])}")
+
+
 def load_market_data(path: Path) -> pd.DataFrame:
     """读取本地 parquet 行情数据。"""
     if not path.exists():
@@ -110,15 +180,12 @@ def main() -> None:
     trials = miner.run(generations=args.generations)
 
     best = miner.best_trials(limit=1)
-    print("\n========== Phase 2 运行结束 ==========")
+    print("\n========== 自动策略研究运行结束 ==========")
     print(f"总试验次数：{len(trials)}")
     if best:
-        best_trial = best[0]
-        print(f"当前最佳因子：{best_trial.candidate.name}")
-        print(f"指标：{best_trial.metrics}")
-        print(f"得分：{best_trial.score:.4f}")
+        _print_best_strategy_summary(best[0])
     else:
-        print("暂无成功因子，请查看 factors_pool/trial_*.json 中的报错反馈。")
+        print("暂无成功策略，请查看 factors_pool/trial_*.json 中的报错反馈。")
 
     print(f"结果目录：{DEFAULT_FACTORS_POOL}")
 

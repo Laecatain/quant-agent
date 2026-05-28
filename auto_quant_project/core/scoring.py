@@ -63,6 +63,60 @@ def _split_raw_score(metrics: Mapping[str, Any], weights: Mapping[str, float]) -
     return float(score)
 
 
+def _get_backtest_summary(metrics_by_split: Mapping[str, Any], split: str) -> Mapping[str, Any]:
+    backtest = metrics_by_split.get("backtest", {})
+    if not isinstance(backtest, Mapping):
+        return {}
+    summary = backtest.get(split, {})
+    if isinstance(summary, Mapping):
+        return summary
+    return {}
+
+
+def _get_backtest_metrics(metrics_by_split: Mapping[str, Any], split: str) -> Mapping[str, Any]:
+    summary = _get_backtest_summary(metrics_by_split, split)
+    metrics = summary.get("metrics", {})
+    if isinstance(metrics, Mapping):
+        return metrics
+    return {}
+
+
+def _backtest_metric(metrics_by_split: Mapping[str, Any], split: str, key: str, default: float = math.nan) -> float:
+    metrics = _get_backtest_metrics(metrics_by_split, split)
+    summary = _get_backtest_summary(metrics_by_split, split)
+    return _safe_float(metrics.get(key, summary.get(key)), default=default)
+
+
+def _split_backtest_score(metrics_by_split: Mapping[str, Any], split: str) -> float:
+    annualized_return = _backtest_metric(metrics_by_split, split, "annualized_return")
+    sharpe = _backtest_metric(metrics_by_split, split, "sharpe")
+    total_return = _backtest_metric(metrics_by_split, split, "total_return")
+    max_drawdown = abs(_backtest_metric(metrics_by_split, split, "max_drawdown", default=0.0))
+    average_turnover = _backtest_metric(metrics_by_split, split, "average_turnover", default=math.nan)
+
+    score = 0.0
+    score += 1.5 * _bounded_metric(annualized_return, scale=0.25)
+    score += 1.2 * _bounded_metric(sharpe, scale=2.5)
+    score += 0.5 * _bounded_metric(total_return, scale=0.2)
+    score -= 1.0 * _bounded_metric(max_drawdown, scale=0.2)
+    if math.isfinite(average_turnover):
+        score -= 0.4 * _bounded_metric(max(0.0, average_turnover - 1.0), scale=2.0)
+    return float(score)
+
+
+def _backtest_score(
+    metrics_by_split: Mapping[str, Any],
+    *,
+    valid_weight: float,
+    test_weight: float,
+) -> tuple[float, dict[str, float]]:
+    valid_score = _split_backtest_score(metrics_by_split, "valid")
+    test_score = _split_backtest_score(metrics_by_split, "test")
+    total_split_weight = valid_weight + test_weight
+    score = (valid_weight * valid_score + test_weight * test_score) / total_split_weight
+    return float(score), {"valid": float(valid_score), "test": float(test_score)}
+
+
 def _nan_missing_penalty(metrics_by_split: Mapping[str, Any]) -> tuple[float, list[str]]:
     """对 valid/test 核心指标缺失或 NaN 施加惩罚。"""
     reasons: list[str] = []
@@ -179,6 +233,7 @@ def score_metrics(
     min_sample_size: int = 100,
     complexity: float | None = None,
     max_complexity: float | None = None,
+    backtest_weight: float = 0.0,
 ) -> dict[str, Any]:
     """综合 train/valid/test 指标，返回稳健评分分解。
 
@@ -199,6 +254,7 @@ def score_metrics(
         min_sample_size: valid/test 最低样本量建议值。
         complexity: 预留代码复杂度输入，例如 AST 节点数、表达式长度等。
         max_complexity: 复杂度阈值，超过后扣分。
+        backtest_weight: 回测指标得分权重，默认 0 以兼容旧因子评分。
 
     Returns:
         dict[str, Any]: 包含 raw_score、overfit_penalty、quality_penalty、final_score 及明细。
@@ -207,6 +263,8 @@ def score_metrics(
         raise TypeError(f"metrics_by_split 必须是 dict-like，当前类型为：{type(metrics_by_split).__name__}")
     if valid_weight < 0 or test_weight < 0:
         raise ValueError("valid_weight 和 test_weight 必须非负")
+    if backtest_weight < 0:
+        raise ValueError("backtest_weight 必须非负")
     total_split_weight = valid_weight + test_weight
     if total_split_weight <= 0:
         raise ValueError("valid_weight 和 test_weight 不能同时为 0")
@@ -217,7 +275,13 @@ def score_metrics(
 
     valid_score = _split_raw_score(valid_metrics, metric_weights)
     test_score = _split_raw_score(test_metrics, metric_weights)
-    raw_score = (valid_weight * valid_score + test_weight * test_score) / total_split_weight
+    factor_score = (valid_weight * valid_score + test_weight * test_score) / total_split_weight
+    backtest_score, backtest_split_scores = _backtest_score(
+        metrics_by_split,
+        valid_weight=valid_weight,
+        test_weight=test_weight,
+    )
+    raw_score = factor_score + backtest_weight * backtest_score
 
     overfit_penalty, overfit_reasons = _overfit_penalty(
         metrics_by_split,
@@ -240,6 +304,10 @@ def score_metrics(
         "quality_penalty": float(quality_penalty),
         "final_score": float(final_score),
         "details": {
+            "factor_score": float(factor_score),
+            "backtest_score": float(backtest_score if backtest_weight else 0.0),
+            "backtest_split_scores": backtest_split_scores,
+            "backtest_weight": float(backtest_weight),
             "valid_score": float(valid_score),
             "test_score": float(test_score),
             "weights": metric_weights,

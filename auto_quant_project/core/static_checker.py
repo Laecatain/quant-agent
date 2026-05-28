@@ -81,13 +81,66 @@ _FORBIDDEN_CALLS = {
 _FORBIDDEN_METHODS = {
     # File IO / path traversal.
     "read",
+    "loads",
+    "load",
     "read_text",
     "read_bytes",
     "readlines",
+    "writestr",
+    "get_handle",
+    "to_string",
+    "to_markdown",
+    "to_latex",
+    "to_html",
+    "to_xml",
+    "to_stata",
+    "to_gbq",
+    "to_orc",
+    "to_clipboard",
+    "HDFStore",
+    "ExcelFile",
+    "ExcelWriter",
+    "parse",
+    "query",
+    "eval",
+    "plot",
+    "plotting",
+    "scatter_matrix",
+    "show_versions",
+    "hist",
+    "boxplot",
+    "get_figure",
+    "figure",
+    "canvas",
+    "savefig",
+    "print_figure",
+    "print_png",
+    "print_pdf",
+    "print_svg",
+    "save",
+    "extract",
+    "extractall",
     "write",
     "write_text",
     "write_bytes",
     "writelines",
+    "load",
+    "save",
+    "savetxt",
+    "savez",
+    "savez_compressed",
+    "fromfile",
+    "fromregex",
+    "recfromcsv",
+    "recfromtxt",
+    "memmap",
+    "genfromtxt",
+    "loadtxt",
+    "open_memmap",
+    "read_array",
+    "write_array",
+    "tofile",
+    "dump",
     "rename",
     "replace",
     "unlink",
@@ -106,9 +159,25 @@ _FORBIDDEN_METHODS = {
     "resolve",
     "absolute",
     "expanduser",
-    # Process / shell execution.
+    # Native library / archive escape hatches exposed through package internals.
+    "load_library",
+    "zipfile_factory",
+    "ZipFile",
+    "NpzFile",
+    "DataSource",
+    "_datasource",
+    "read_array",
+    "write_array",
+    "runstring",
+    "rundocs",
+    "test",
+    "_pytesttester",
+    "PytestTester",
+    "tempdir",
+    "temppath",
     "system",
     "popen",
+    "Popen",
     "run",
     "call",
     "check_call",
@@ -155,22 +224,199 @@ _FORBIDDEN_ATTRIBUTES = {
     "__getattr__",
     "__setattr__",
     "__delattr__",
+    "ctypeslib",
+    "zipfile",
+    "npyio",
+    "testing",
+    "_testing",
+    "_pytesttester",
+    "pickle",
+    "io",
+    "common",
+    "core",
+    "frame",
+    "operator",
+    "attrgetter",
+    "methodcaller",
+    "itemgetter",
+    "compat",
+    "_optional",
+    "import_optional_dependency",
 }
 
 # Regex fallback catches syntax-obfuscated or otherwise suspicious strings even
 # when AST parsing fails. Keep pandas-safe methods out of this list.
 _STRING_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"(^|\n)\s*(import|from)\s+", re.IGNORECASE), "禁止使用 import/from import。"),
-    (re.compile(r"\b(open|eval|exec|compile|__import__)\s*\(", re.IGNORECASE), "禁止调用 open/eval/exec/compile/__import__。"),
-    (re.compile(r"\b(os|sys|subprocess|socket|requests|urllib|http|pathlib|shutil|importlib|builtins)\b", re.IGNORECASE), "禁止访问系统、文件或网络相关模块。"),
-    (re.compile(r"\.\s*(read|read_text|read_bytes|write|write_text|write_bytes|unlink|remove|rename)\s*\(", re.IGNORECASE), "禁止文件读写或文件系统修改。"),
-    (re.compile(r"\.\s*(system|popen|run|check_call|check_output)\s*\(", re.IGNORECASE), "禁止进程或 shell 执行。"),
-    (re.compile(r"\.\s*(request|get|post|put|patch|delete|urlopen|connect|send|recv)\s*\(", re.IGNORECASE), "禁止网络请求或 socket 通信。"),
-    (re.compile(r"\bshift\s*\(\s*-\s*(?:[1-9]\d*|[a-zA-Z_])", re.IGNORECASE), "禁止使用 shift 负值，疑似未来函数。"),
-    (re.compile(r"__\s*(?:class|bases|base|subclasses|mro|globals|code|closure|dict|getattribute)\s*__", re.IGNORECASE), "禁止反射/逃逸相关双下划线属性。"),
-    (re.compile(r"\bto_(?:csv|excel|parquet|pickle|feather|hdf|json|sql)\s*\(", re.IGNORECASE), "禁止写出文件或外部存储。"),
-    (re.compile(r"\bread_(?:csv|excel|parquet|pickle|feather|hdf|json|sql|table)\s*\(", re.IGNORECASE), "禁止从文件或外部存储读取数据。"),
+    (
+        re.compile(r"(^|\n)\s*(import|from)\s+", re.IGNORECASE),
+        "禁止使用 import/from import。",
+    ),
+    (
+        re.compile(r"\b(open|eval|exec|compile|__import__)\s*\(", re.IGNORECASE),
+        "禁止调用 open/eval/exec/compile/__import__。",
+    ),
+    (
+        re.compile(
+            r"\b(os|sys|subprocess|socket|requests|urllib|http|pathlib|shutil|importlib|builtins)\b",
+            re.IGNORECASE,
+        ),
+        "禁止访问系统、文件或网络相关模块。",
+    ),
+    (
+        re.compile(
+            r"\.\s*(read|read_text|read_bytes|write|write_text|write_bytes|unlink|remove|rename)\s*\(",
+            re.IGNORECASE,
+        ),
+        "禁止文件读写或文件系统修改。",
+    ),
+    (
+        re.compile(
+            r"\bnp\s*\.\s*(?:\w+\s*\.\s*)*(load|save|savetxt|savez|savez_compressed|fromfile|fromregex|recfromcsv|recfromtxt|memmap|genfromtxt|loadtxt|open_memmap)\s*\(",
+            re.IGNORECASE,
+        ),
+        "禁止 NumPy 文件 IO。",
+    ),
+    (
+        re.compile(
+            r"\b(?:np|pd)\s*\.\s*(?:\w+\s*\.\s*)*(testing|_testing|test|_pytesttester|PytestTester|runstring|rundocs|tempdir|temppath)\b",
+            re.IGNORECASE,
+        ),
+        "禁止访问包测试或调试入口。",
+    ),
+    (
+        re.compile(
+            r"\b(?:pd|np)\s*\.\s*(?:\w+\s*\.\s*)*(core|operator|attrgetter|methodcaller|itemgetter)\b",
+            re.IGNORECASE,
+        ),
+        "禁止访问 pandas/NumPy 内部遍历接口。",
+    ),
+    (
+        re.compile(
+            r"\bpd\s*\.\s*(?:\w+\s*\.\s*)*(compat|_optional|import_optional_dependency|io|common|get_handle|HDFStore|ExcelFile|ExcelWriter)\b",
+            re.IGNORECASE,
+        ),
+        "禁止访问 pandas 文件 IO 或高风险内部接口。",
+    ),
+    (
+        re.compile(
+            r"\bnp\s*\.\s*(?:\w+\s*\.\s*)*(ctypeslib|load_library|npyio|zipfile|ZipFile|zipfile_factory|NpzFile|DataSource|_datasource|read_array|write_array|pickle|loads|testing|runstring|rundocs|tempdir|temppath)\b",
+            re.IGNORECASE,
+        ),
+        "禁止访问 NumPy 高风险内部接口。",
+    ),
+    (
+        re.compile(
+            r"\bpd\s*\.\s*(?:\w+\s*\.\s*)*(plotting|show_versions|scatter_matrix)\b",
+            re.IGNORECASE,
+        ),
+        "禁止访问 pandas 绘图或环境信息输出接口。",
+    ),
+    (
+        re.compile(
+            r"\.\s*(plot|hist|boxplot|get_figure|figure|canvas|savefig|save|print_figure|print_png|print_pdf|print_svg)\s*\(?",
+            re.IGNORECASE,
+        ),
+        "禁止绘图或图像文件输出。",
+    ),
+    (
+        re.compile(
+            r"\.\s*(tofile|dump|writestr|to_string|to_markdown|to_latex|to_html|to_xml|to_stata|to_gbq|to_orc|to_clipboard|extract|extractall)\s*\(",
+            re.IGNORECASE,
+        ),
+        "禁止 NumPy 数组或归档文件 IO。",
+    ),
+    (
+        re.compile(
+            r"\.\s*(system|popen|Popen|run|check_call|check_output)\s*\(", re.IGNORECASE
+        ),
+        "禁止进程或 shell 执行。",
+    ),
+    (
+        re.compile(
+            r"\.\s*(request|get|post|put|patch|delete|urlopen|connect|send|recv)\s*\(",
+            re.IGNORECASE,
+        ),
+        "禁止网络请求或 socket 通信。",
+    ),
+    (
+        re.compile(r"\bshift\s*\(\s*-\s*(?:[1-9]\d*|[a-zA-Z_])", re.IGNORECASE),
+        "禁止使用 shift 负值，疑似未来函数。",
+    ),
+    (
+        re.compile(
+            r"__\s*(?:class|bases|base|subclasses|mro|globals|code|closure|dict|getattribute)\s*__",
+            re.IGNORECASE,
+        ),
+        "禁止反射/逃逸相关双下划线属性。",
+    ),
+    (
+        re.compile(
+            r"\bto_(?:csv|excel|parquet|pickle|feather|hdf|json|sql|html|xml|stata|gbq|orc|clipboard|markdown|latex|string)\s*\(",
+            re.IGNORECASE,
+        ),
+        "禁止写出文件或外部存储。",
+    ),
+    (
+        re.compile(
+            r"\bread_(?:csv|excel|parquet|pickle|feather|hdf|json|sql|table)\s*\(",
+            re.IGNORECASE,
+        ),
+        "禁止从文件或外部存储读取数据。",
+    ),
 )
+
+_NUMPY_FILE_IO_METHODS = {
+    "load",
+    "save",
+    "savetxt",
+    "savez",
+    "savez_compressed",
+    "fromfile",
+    "fromregex",
+    "recfromcsv",
+    "recfromtxt",
+    "memmap",
+    "genfromtxt",
+    "loadtxt",
+    "open_memmap",
+    "read_array",
+    "write_array",
+    "tofile",
+    "dump",
+}
+
+_PANDAS_IO_METHODS = {
+    "read_csv",
+    "read_excel",
+    "read_parquet",
+    "read_pickle",
+    "read_feather",
+    "read_hdf",
+    "read_json",
+    "read_sql",
+    "read_table",
+    "to_csv",
+    "to_excel",
+    "to_parquet",
+    "to_pickle",
+    "to_feather",
+    "to_hdf",
+    "to_json",
+    "to_sql",
+    "to_html",
+    "to_xml",
+    "to_stata",
+    "to_gbq",
+    "to_orc",
+    "to_clipboard",
+    "to_markdown",
+    "to_latex",
+    "to_string",
+    "HDFStore",
+    "ExcelFile",
+    "ExcelWriter",
+    "get_handle",
+}
 
 _PANDAS_SAFE_METHODS = {
     "groupby",
@@ -260,14 +506,20 @@ class _SafetyVisitor(ast.NodeVisitor):
         self.warnings = warnings
 
     def visit_While(self, node: ast.While) -> None:  # noqa: N802 - ast API
-        self.warnings.append("检测到显式 while 循环；因子代码建议使用 pandas/numpy 向量化实现。")
+        self.warnings.append(
+            "检测到显式 while 循环；因子代码建议使用 pandas/numpy 向量化实现。"
+        )
         self.generic_visit(node)
 
     def visit_For(self, node: ast.For) -> None:  # noqa: N802 - ast API
         if _is_row_iteration(node.iter):
-            self.errors.append("禁止逐行遍历 data.iterrows()/data.itertuples()，请改用向量化 pandas 操作。")
+            self.errors.append(
+                "禁止逐行遍历 data.iterrows()/data.itertuples()，请改用向量化 pandas 操作。"
+            )
         else:
-            self.warnings.append("检测到显式 for 循环；因子代码建议使用 pandas/numpy 向量化实现。")
+            self.warnings.append(
+                "检测到显式 for 循环；因子代码建议使用 pandas/numpy 向量化实现。"
+            )
         self.generic_visit(node)
 
     def visit_Import(self, node: ast.Import) -> None:  # noqa: N802 - ast API
@@ -290,10 +542,14 @@ class _SafetyVisitor(ast.NodeVisitor):
         root = _root_name(node)
         dotted = _dotted_name(node)
 
-        if attr in _FORBIDDEN_ATTRIBUTES or (attr.startswith("__") and attr.endswith("__")):
+        if attr in _FORBIDDEN_ATTRIBUTES or (
+            attr.startswith("__") and attr.endswith("__")
+        ):
             self.errors.append(f"禁止反射/逃逸属性访问：{dotted or attr}。")
         elif root in _FORBIDDEN_MODULE_ROOTS:
             self.errors.append(f"禁止访问高风险模块属性：{dotted or root}。")
+        elif _is_pandas_io_attribute(node):
+            self.errors.append(f"禁止访问 pandas 文件/外部存储 IO：{dotted or attr}。")
         elif attr in _FORBIDDEN_METHODS and attr not in _PANDAS_SAFE_METHODS:
             self.errors.append(f"禁止访问高风险方法或属性：{dotted or attr}。")
 
@@ -312,16 +568,27 @@ class _SafetyVisitor(ast.NodeVisitor):
             dotted = _dotted_name(node.func)
             if attr in _FORBIDDEN_METHODS and attr not in _PANDAS_SAFE_METHODS:
                 self.errors.append(f"禁止调用高风险方法：{dotted or attr}()。")
+            if root == "np" and attr in _NUMPY_FILE_IO_METHODS:
+                self.errors.append(f"禁止 NumPy 文件 IO：{dotted or attr}()。")
             if attr == "shift" and _has_negative_shift(node):
                 self.errors.append("禁止使用 shift 负值，疑似未来函数。")
             if _is_pandas_io_call(node.func):
-                self.errors.append(f"禁止 pandas 文件/外部存储 IO：{dotted or attr}()。")
+                self.errors.append(
+                    f"禁止 pandas 文件/外部存储 IO：{dotted or attr}()。"
+                )
 
         # Dynamic reflection via getattr(x, "__subclasses__") or getattr(os, "system").
-        if isinstance(node.func, ast.Name) and node.func.id in {"getattr", "setattr", "delattr", "hasattr"}:
+        if isinstance(node.func, ast.Name) and node.func.id in {
+            "getattr",
+            "setattr",
+            "delattr",
+            "hasattr",
+        }:
             reflected = _literal_arg(node, 1)
             if reflected:
-                self.errors.append(f"禁止反射访问：{node.func.id}(..., {reflected!r})。")
+                self.errors.append(
+                    f"禁止反射访问：{node.func.id}(..., {reflected!r})。"
+                )
 
         self.generic_visit(node)
 
@@ -337,12 +604,10 @@ class _SafetyVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-
 def _run_string_fallback(code: str, errors: list[str]) -> None:
     for pattern, message in _STRING_RULES:
         if pattern.search(code):
             errors.append(message)
-
 
 
 def _is_row_iteration(node: ast.AST) -> bool:
@@ -352,7 +617,6 @@ def _is_row_iteration(node: ast.AST) -> bool:
         return False
     root = _root_name(node.func)
     return root == "data"
-
 
 
 def _assigns_factor(tree: ast.AST) -> bool:
@@ -367,7 +631,6 @@ def _assigns_factor(tree: ast.AST) -> bool:
     return False
 
 
-
 def _target_contains_name(target: ast.AST, name: str) -> bool:
     if isinstance(target, ast.Name):
         return target.id == name
@@ -376,12 +639,10 @@ def _target_contains_name(target: ast.AST, name: str) -> bool:
     return False
 
 
-
 def _call_name(func: ast.AST) -> str | None:
     if isinstance(func, ast.Name):
         return func.id
     return _dotted_name(func)
-
 
 
 def _dotted_name(node: ast.AST) -> str | None:
@@ -394,7 +655,6 @@ def _dotted_name(node: ast.AST) -> str | None:
         parts.append(current.id)
         return ".".join(reversed(parts))
     return None
-
 
 
 def _root_name(node: ast.AST) -> str | None:
@@ -410,7 +670,6 @@ def _root_name(node: ast.AST) -> str | None:
     return None
 
 
-
 def _has_negative_shift(call: ast.Call) -> bool:
     if call.args and _is_negative_numeric(call.args[0]):
         return True
@@ -420,10 +679,11 @@ def _has_negative_shift(call: ast.Call) -> bool:
     return False
 
 
-
 def _is_negative_numeric(node: ast.AST) -> bool:
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-        if isinstance(node.operand, ast.Constant) and isinstance(node.operand.value, (int, float)):
+        if isinstance(node.operand, ast.Constant) and isinstance(
+            node.operand.value, (int, float)
+        ):
             return node.operand.value > 0
         # shift(-n) is also suspicious even if n is a variable.
         if isinstance(node.operand, ast.Name):
@@ -433,21 +693,18 @@ def _is_negative_numeric(node: ast.AST) -> bool:
     return False
 
 
+def _is_pandas_io_attribute(node: ast.Attribute) -> bool:
+    attr = node.attr
+    root = _root_name(node)
+    if attr.startswith("read_"):
+        return True
+    if attr.startswith("to_") and attr in _PANDAS_IO_METHODS:
+        return True
+    return root in {"pd", "data"} and attr in _PANDAS_IO_METHODS
+
 
 def _is_pandas_io_call(func: ast.Attribute) -> bool:
-    attr = func.attr
-    root = _root_name(func)
-    return (root in {"pd", "data"} and attr.startswith("read_")) or attr in {
-        "to_csv",
-        "to_excel",
-        "to_parquet",
-        "to_pickle",
-        "to_feather",
-        "to_hdf",
-        "to_json",
-        "to_sql",
-    }
-
+    return _is_pandas_io_attribute(func)
 
 
 def _literal_arg(call: ast.Call, index: int) -> str | None:
@@ -459,7 +716,6 @@ def _literal_arg(call: ast.Call, index: int) -> str | None:
     return None
 
 
-
 def _literal_slice(node: ast.AST) -> object | None:
     if isinstance(node, ast.Constant):
         return node.value
@@ -469,12 +725,12 @@ def _literal_slice(node: ast.AST) -> object | None:
     return None
 
 
-
 def _dedupe_result(errors: list[str], warnings: list[str]) -> CheckResult:
     unique_errors = _dedupe(errors)
     unique_warnings = _dedupe(warnings)
-    return CheckResult(passed=not unique_errors, errors=unique_errors, warnings=unique_warnings)
-
+    return CheckResult(
+        passed=not unique_errors, errors=unique_errors, warnings=unique_warnings
+    )
 
 
 def _dedupe(items: list[str]) -> list[str]:

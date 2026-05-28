@@ -14,7 +14,7 @@ import json
 import math
 import re
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -30,13 +30,18 @@ from core.splitter import DateSplit, split_by_date
 from core.static_checker import check_factor_code
 
 
+ALLOWED_TOP_QUANTILES = {0.05, 0.1, 0.2, 0.25, 0.3}
+ALLOWED_REBALANCE_DAYS = {1, 3, 5, 10, 20}
+MAX_COST_BPS = 100.0
+
+
 SYSTEM_PROMPT = """
 你是一位严谨的量化研究员与 Python 向量化编程专家。
 你的任务是生成 A 股日频 Alpha 因子代码，用于预测下一交易日横截面收益。
 
 硬性约束：
 1. 只能输出 JSON，不能输出 Markdown、解释文本或代码围栏。
-2. JSON 必须包含字段：name, hypothesis, code, lookback_days, expected_direction。
+2. JSON 必须包含字段：name, hypothesis, code, lookback_days, expected_direction, strategy。
 3. code 必须是 Python 代码字符串，执行后必须产生 pandas.Series 变量 factor。
 4. 可用变量只有 data, pd, np。data 字段为：date, code, open, high, low, close, volume, amount。
 5. 必须全向量化，严禁逐行 for 循环；允许 groupby、rolling、rank、pct_change、transform。
@@ -46,6 +51,8 @@ SYSTEM_PROMPT = """
    ...
    factor = some_series.reindex(data.index)
 8. 因子应尽量具备横截面区分度，不要输出常数或几乎全 NaN。
+9. strategy 只能是参数对象，不能包含交易代码；字段限制为 side, top_quantile, rebalance_days, cost_bps。
+10. strategy.side 只能是 long_short 或 long_only；top_quantile 只能从 0.05, 0.1, 0.2, 0.25, 0.3 中选择；rebalance_days 只能从 1, 3, 5, 10, 20 中选择；cost_bps 必须在 0 到 100 之间。
 """.strip()
 
 
@@ -58,6 +65,7 @@ class FactorCandidate:
     code: str
     lookback_days: int
     expected_direction: str
+    strategy: StrategySpec = field(default_factory=StrategySpec)
 
 
 @dataclass(frozen=True)
@@ -131,8 +139,19 @@ class FactorMiner:
         """
         for generation in range(1, generations + 1):
             print(f"\n========== Generation {generation}/{generations} ==========")
-            candidate = self.generate_candidate(generation=generation)
-            trial = self.evaluate_candidate(candidate=candidate, generation=generation)
+            try:
+                candidate = self.generate_candidate(generation=generation)
+            except Exception as exc:  # noqa: BLE001 - 生成阶段错误也要反馈给后续迭代。
+                candidate = self._generation_error_candidate()
+                trial = self._make_trial(
+                    generation=generation,
+                    candidate=candidate,
+                    sandbox_result=SandboxResult(success=False, factor=None, error=repr(exc)),
+                    metrics={"generation_error": repr(exc)},
+                    score=float("-inf"),
+                )
+            else:
+                trial = self.evaluate_candidate(candidate=candidate, generation=generation)
             self.trials.append(trial)
             self._persist_trial(trial)
             self._persist_best_factors()
@@ -154,6 +173,16 @@ class FactorMiner:
         raw_text = self.llm_client.generate_text(prompt=prompt, system_prompt=SYSTEM_PROMPT)
         payload = self._parse_json(raw_text)
         return self._candidate_from_payload(payload)
+
+    @staticmethod
+    def _generation_error_candidate() -> FactorCandidate:
+        return FactorCandidate(
+            name="generation_error",
+            hypothesis="LLM candidate generation or JSON validation failed.",
+            code="factor = pd.Series(index=data.index, dtype='float64')",
+            lookback_days=0,
+            expected_direction="unknown",
+        )
 
     def evaluate_candidate(self, candidate: FactorCandidate, generation: int) -> FactorTrial:
         """执行候选因子并计算 train/valid/test 指标。"""
@@ -199,12 +228,12 @@ class FactorMiner:
                 "errors": [],
                 "warnings": check_result.warnings,
             }
-            score_breakdown = score_metrics(metrics_by_split)
-            metrics_by_split["score_breakdown"] = score_breakdown
             try:
-                metrics_by_split["backtest"] = self._backtest_factor_by_split(sandbox_result.factor)
+                metrics_by_split["backtest"] = self._backtest_factor_by_split(sandbox_result.factor, candidate.strategy)
             except Exception as exc:  # noqa: BLE001 - 回测失败应反馈但不阻断因子评分。
                 metrics_by_split["backtest_error"] = repr(exc)
+            score_breakdown = score_metrics(metrics_by_split, backtest_weight=1.0)
+            metrics_by_split["score_breakdown"] = score_breakdown
             score = float(score_breakdown["final_score"])
             return self._make_trial(
                 generation=generation,
@@ -243,17 +272,24 @@ class FactorMiner:
 
         return json.dumps(
             {
-                "task": "生成下一代 A 股日频 Alpha 因子。",
+                "task": "生成下一代 A 股日频 Alpha 因子和受控策略参数。",
                 "generation": generation,
                 "data_profile": data_profile,
                 "recent_trials": history,
                 "best_trials": best,
+                "strategy_schema": {
+                    "side": ["long_short", "long_only"],
+                    "top_quantile": sorted(ALLOWED_TOP_QUANTILES),
+                    "rebalance_days": sorted(ALLOWED_REBALANCE_DAYS),
+                    "cost_bps": {"min": 0.0, "max": MAX_COST_BPS},
+                },
                 "instructions": [
                     "如果上一代报错，优先修复代码结构、索引对齐、字段名、NaN 问题。",
-                    "如果上一代成功但 Sharpe 或 Rank_IC 较差，请从经济假设上变异，而不是微调常数。",
+                    "如果上一代成功但 Sharpe、Rank_IC 或回测表现较差，请从经济假设和策略参数上变异，而不是微调常数。",
                     "优先探索价量关系、短期反转、动量、波动率压缩/扩张、量价背离。",
-                    "严禁使用 shift(-1) 构造 factor；未来收益只由 evaluator 计算。",
-                    "输出严格 JSON：name, hypothesis, code, lookback_days, expected_direction。",
+                    "严禁使用 shift(-1) 构造 factor；未来收益只由 evaluator 和 backtester 计算。",
+                    "strategy 只能表达 side/top_quantile/rebalance_days/cost_bps，不得生成交易执行代码。",
+                    "输出严格 JSON：name, hypothesis, code, lookback_days, expected_direction, strategy。",
                 ],
             },
             ensure_ascii=False,
@@ -293,7 +329,62 @@ class FactorMiner:
             code=str(payload["code"]).strip(),
             lookback_days=int(payload["lookback_days"]),
             expected_direction=str(payload["expected_direction"]).strip(),
+            strategy=FactorMiner._strategy_spec_from_payload(payload.get("strategy")),
         )
+
+    @staticmethod
+    def _strategy_spec_from_payload(payload: object) -> StrategySpec:
+        if payload is None:
+            return StrategySpec()
+        if not isinstance(payload, dict):
+            raise ValueError("strategy 必须是 JSON object")
+
+        default_strategy = StrategySpec()
+        side = str(payload.get("side", default_strategy.side)).strip()
+        top_quantile = FactorMiner._strategy_float(payload.get("top_quantile", default_strategy.top_quantile), "top_quantile")
+        rebalance_days = FactorMiner._strategy_int(
+            payload.get("rebalance_days", default_strategy.rebalance_days),
+            "rebalance_days",
+        )
+        cost_bps = FactorMiner._strategy_float(payload.get("cost_bps", default_strategy.cost_bps), "cost_bps")
+
+        if top_quantile not in ALLOWED_TOP_QUANTILES:
+            raise ValueError(f"strategy.top_quantile 必须是 {sorted(ALLOWED_TOP_QUANTILES)} 之一")
+        if rebalance_days not in ALLOWED_REBALANCE_DAYS:
+            raise ValueError(f"strategy.rebalance_days 必须是 {sorted(ALLOWED_REBALANCE_DAYS)} 之一")
+        if not 0.0 <= cost_bps <= MAX_COST_BPS:
+            raise ValueError(f"strategy.cost_bps 必须在 0 到 {MAX_COST_BPS:g} 之间")
+
+        try:
+            return StrategySpec(
+                top_quantile=top_quantile,
+                rebalance_days=rebalance_days,
+                cost_bps=cost_bps,
+                side=side,
+            )
+        except ValueError as exc:
+            raise ValueError(f"strategy 参数无效：{exc}") from exc
+
+    @staticmethod
+    def _strategy_float(value: object, field_name: str) -> float:
+        if isinstance(value, bool):
+            raise ValueError(f"strategy.{field_name} 必须是数字")
+        try:
+            return float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"strategy.{field_name} 必须是数字") from exc
+
+    @staticmethod
+    def _strategy_int(value: object, field_name: str) -> int:
+        if isinstance(value, bool):
+            raise ValueError(f"strategy.{field_name} 必须是整数")
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value)
+        raise ValueError(f"strategy.{field_name} 必须是整数")
 
     @staticmethod
     def _score_metrics(metrics: dict[str, float]) -> float:
@@ -343,6 +434,7 @@ class FactorMiner:
             "generation": trial.generation,
             "name": trial.candidate.name,
             "hypothesis": trial.candidate.hypothesis,
+            "strategy": asdict(trial.candidate.strategy),
             "code": trial.candidate.code,
             "success": trial.sandbox_success,
             "metrics": trial.metrics,
@@ -358,18 +450,17 @@ class FactorMiner:
             metrics_by_split[split_name] = evaluate_factor(factor=split_factor, price_data=split_data)
         return metrics_by_split
 
-    def _backtest_factor_by_split(self, factor: pd.Series) -> dict[str, Any]:
+    def _backtest_factor_by_split(self, factor: pd.Series, strategy_spec: StrategySpec) -> dict[str, Any]:
         """在 train/valid/test 三段上分别回测因子策略并返回可 JSON 序列化摘要。"""
         backtest_by_split: dict[str, Any] = {}
-        strategy_spec = StrategySpec()
         for split_name, split_data in self.data_splits.as_dict().items():
             split_factor = factor.reindex(split_data.index)
             result = backtest_factor_strategy(data=split_data, factor=split_factor, spec=strategy_spec)
-            backtest_by_split[split_name] = self._summarize_backtest_result(result)
+            backtest_by_split[split_name] = self._summarize_backtest_result(result, strategy_spec)
         return backtest_by_split
 
     @staticmethod
-    def _summarize_backtest_result(result: dict[str, object]) -> dict[str, Any]:
+    def _summarize_backtest_result(result: dict[str, object], strategy_spec: StrategySpec) -> dict[str, Any]:
         """压缩回测结果，避免 trial JSON 写入完整持仓与净值序列。"""
         daily_returns = result.get("daily_returns")
         equity_curve = result.get("equity_curve")
@@ -386,6 +477,7 @@ class FactorMiner:
             average_turnover = float(turnover.mean())
 
         return {
+            "strategy": asdict(strategy_spec),
             "metrics": dict(metrics) if isinstance(metrics, dict) else {},
             "daily_return_count": daily_return_count,
             "final_equity": final_equity,
